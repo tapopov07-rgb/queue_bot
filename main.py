@@ -1,6 +1,8 @@
 import asyncio
 import logging
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -27,22 +29,25 @@ async def on_error(event: ErrorEvent) -> bool | None:
     return None  # остальные ошибки aiogram залогирует сам, с подробностями
 
 
-def setup_logging() -> None:
+def setup_logging(tz: ZoneInfo) -> None:
     """Логи в консоль и в logs/bot.log (5 файлов по 1 МБ, старые удаляются)."""
     log_dir = BASE_DIR / "logs"
     log_dir.mkdir(exist_ok=True)
     file_handler = RotatingFileHandler(log_dir / "bot.log", maxBytes=1_000_000, backupCount=5, encoding="utf-8")
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=[logging.StreamHandler(), file_handler],
-    )
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # время в логах — в часовом поясе из настроек, а не в системном
+    # (на Windows переменная TZ=Europe/Moscow непонятна системе, и логи шли бы по UTC)
+    formatter.converter = lambda ts: datetime.fromtimestamp(ts, tz).timetuple()
+    handlers = [logging.StreamHandler(), file_handler]
+    for handler in handlers:
+        handler.setFormatter(formatter)
+    logging.basicConfig(level=logging.INFO, handlers=handlers)
     logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 
 async def main() -> None:
-    setup_logging()
     config = load_config()
+    setup_logging(config.tz)
 
     db = Database(config.db_path)
     await db.init()
