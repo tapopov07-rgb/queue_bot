@@ -46,16 +46,24 @@ CREATE TABLE IF NOT EXISTS stream_members (
     PRIMARY KEY (stream_id, user_id)
 );
 
-CREATE TABLE IF NOT EXISTS schedule (                -- этап 3
-    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-    stream_id          INTEGER NOT NULL REFERENCES streams(id) ON DELETE CASCADE,
-    subject            TEXT    NOT NULL,
-    weekday            INTEGER NOT NULL CHECK (weekday BETWEEN 0 AND 6),
-    start_time         TEXT    NOT NULL,             -- HH:MM
-    duration_min       INTEGER NOT NULL DEFAULT 90,
-    parity             TEXT    NOT NULL DEFAULT 'all' CHECK (parity IN ('all', 'even', 'odd')),
-    open_before_hours  INTEGER NOT NULL DEFAULT 24,
-    is_active          INTEGER NOT NULL DEFAULT 1
+-- расписание: лабораторная повторяется каждую неделю или раз в 2 недели, начиная с first_date
+CREATE TABLE IF NOT EXISTS schedule (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    stream_id       INTEGER NOT NULL REFERENCES streams(id) ON DELETE CASCADE,
+    subject         TEXT    NOT NULL,
+    first_date      TEXT    NOT NULL,                -- YYYY-MM-DD, первая лабораторная
+    interval_weeks  INTEGER NOT NULL DEFAULT 1 CHECK (interval_weeks IN (1, 2)),
+    until_date      TEXT,                            -- YYYY-MM-DD включительно; NULL — без конца
+    capacity        INTEGER NOT NULL DEFAULT 30,
+    created_by      INTEGER REFERENCES users(id),
+    created_at      INTEGER NOT NULL
+);
+
+-- даты, на которые ответственный отменил лабораторную («⏭ Пропустить»)
+CREATE TABLE IF NOT EXISTS schedule_skips (
+    schedule_id  INTEGER NOT NULL REFERENCES schedule(id) ON DELETE CASCADE,
+    class_date   TEXT    NOT NULL,                   -- YYYY-MM-DD
+    PRIMARY KEY (schedule_id, class_date)
 );
 
 CREATE TABLE IF NOT EXISTS queues (
@@ -72,6 +80,9 @@ CREATE TABLE IF NOT EXISTS queues (
     created_at   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_queues_status ON queues(status);
+-- по одной очереди на дату для каждой пары расписания (защита от дублей при перезапусках)
+CREATE UNIQUE INDEX IF NOT EXISTS ux_queue_schedule_day ON queues(schedule_id, starts_at)
+    WHERE schedule_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS queue_entries (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

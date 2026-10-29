@@ -43,6 +43,11 @@ class QueueScheduler:
             self._add(f"open:{qid}", self._open, qid, max(queue["opens_at"], now + 1))
         self._add(f"close:{qid}", self._close, qid, max(queue["ends_at"], now + 2))
 
+    def add_daily(self, job_id: str, func, hour: int, minute: int = 0, second: int = 0) -> None:
+        """Ежедневная задача (в часовом поясе бота)."""
+        self.scheduler.add_job(func, "cron", hour=hour, minute=minute, second=second, id=job_id,
+                               replace_existing=True, misfire_grace_time=3600, coalesce=True)
+
     def unplan(self, queue_id: int) -> None:
         """Снять задачи удалённой очереди."""
         for job_id in (f"open:{queue_id}", f"close:{queue_id}"):

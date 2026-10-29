@@ -67,6 +67,13 @@ async def group_newqueue(message: Message, db: Database, bot_username: str) -> N
     await message.reply("Очередь создаётся в личке со мной:", reply_markup=kb.as_markup())
 
 
+@router.message(Command("schedule"), F.chat.type.in_(GROUPS))
+async def group_schedule(message: Message, bot_username: str) -> None:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📅 Открыть расписание", url=deep_link(bot_username, "sched"))
+    await message.reply("Расписание ведётся в личке со мной (только ответственный):", reply_markup=kb.as_markup())
+
+
 @router.message(Command("deletequeue"), F.chat.type.in_(GROUPS))
 async def group_deletequeue(message: Message, bot_username: str) -> None:
     kb = InlineKeyboardBuilder()

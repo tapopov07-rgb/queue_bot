@@ -33,6 +33,12 @@ class AddCb(CallbackData, prefix="add"):
     user_id: int  # 0 — отмена
 
 
+class SchedCb(CallbackData, prefix="sc"):
+    action: str     # stream | list | add | item | skip | skipdate | delete | delconfirm | preset | save | cancel
+    sid: int = 0    # id потока (stream/list/add) или пары расписания (item/skip/delete)
+    value: str = ""
+
+
 class DelCb(CallbackData, prefix="del"):
     action: str  # pick | confirm | cancel
     queue_id: int = 0

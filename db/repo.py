@@ -354,6 +354,69 @@ async def expire_queue_swaps(conn: Connection, queue_id: int) -> None:
     )
 
 
+# ---------- schedule ----------
+
+async def create_schedule(conn: Connection, *, stream_id: int, subject: str, first_date: str,
+                          interval_weeks: int, until_date: str | None, capacity: int,
+                          created_by: int) -> int:
+    cur = await conn.execute(
+        """INSERT INTO schedule (stream_id, subject, first_date, interval_weeks, until_date, capacity,
+                                 created_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (stream_id, subject, first_date, interval_weeks, until_date, capacity, created_by, now()),
+    )
+    return cur.lastrowid
+
+
+async def get_schedule(conn: Connection, schedule_id: int) -> Row | None:
+    cur = await conn.execute("SELECT * FROM schedule WHERE id = ?", (schedule_id,))
+    return await cur.fetchone()
+
+
+async def get_stream_schedule(conn: Connection, stream_id: int) -> list[Row]:
+    cur = await conn.execute("SELECT * FROM schedule WHERE stream_id = ? ORDER BY subject, id", (stream_id,))
+    return list(await cur.fetchall())
+
+
+async def get_all_schedule(conn: Connection) -> list[Row]:
+    cur = await conn.execute("SELECT * FROM schedule ORDER BY id")
+    return list(await cur.fetchall())
+
+
+async def delete_schedule(conn: Connection, schedule_id: int) -> None:
+    # уже созданные очереди остаются (schedule_id станет NULL), пропуски удалятся каскадом
+    await conn.execute("DELETE FROM schedule WHERE id = ?", (schedule_id,))
+
+
+async def add_schedule_skip(conn: Connection, schedule_id: int, class_date: str) -> None:
+    await conn.execute(
+        "INSERT OR IGNORE INTO schedule_skips (schedule_id, class_date) VALUES (?, ?)", (schedule_id, class_date)
+    )
+
+
+async def get_schedule_skips(conn: Connection, schedule_id: int) -> set[str]:
+    cur = await conn.execute("SELECT class_date FROM schedule_skips WHERE schedule_id = ?", (schedule_id,))
+    return {r["class_date"] for r in await cur.fetchall()}
+
+
+async def find_schedule_queue(conn: Connection, schedule_id: int, starts_at: int) -> Row | None:
+    cur = await conn.execute(
+        "SELECT * FROM queues WHERE schedule_id = ? AND starts_at = ?", (schedule_id, starts_at)
+    )
+    return await cur.fetchone()
+
+
+async def get_stream_admin_ids(conn: Connection, stream_id: int) -> list[int]:
+    cur = await conn.execute("SELECT user_id FROM stream_admins WHERE stream_id = ?", (stream_id,))
+    return [r["user_id"] for r in await cur.fetchall()]
+
+
+async def delete_closed_queues_before(conn: Connection, ts: int) -> int:
+    """Удалить закрытые очереди, закончившиеся раньше ts. Возвращает их число."""
+    cur = await conn.execute("DELETE FROM queues WHERE status = 'closed' AND ends_at < ?", (ts,))
+    return cur.rowcount
+
+
 # ---------- messages ----------
 
 async def save_queue_message(conn: Connection, queue_id: int, chat_id: int, message_id: int) -> None:

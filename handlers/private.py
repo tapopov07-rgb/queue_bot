@@ -15,7 +15,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import Config
 from db import repo
 from db.database import Database
-from handlers import admin
+from handlers import admin, schedule
 from keyboards import MY_QUEUES_TEXT, AddCb, MyCb, SlotCb, SwapCb, main_menu
 from services.notifier import Notifier
 from services.queue_service import MAX_ADDED_OTHERS, QueueError, QueueService
@@ -36,7 +36,8 @@ HELP_TEXT = (
     "• «👥 Записать одногруппника» — записать ещё одного человека из потока\n"
     "• /myqueues — твои очереди и места\n\n"
     "<b>Ответственным</b>\n"
-    "• /newqueue — создать очередь\n"
+    "• /schedule — расписание лабораторных: очереди открываются сами в 00:00 накануне пары\n"
+    "• /newqueue — разовая очередь вне расписания\n"
     "• /deletequeue — удалить очередь\n"
     "• /cancel — отменить ввод"
 )
@@ -64,6 +65,9 @@ async def cmd_start(message: Message, command: CommandObject, state: FSMContext,
         await send_my_queues(message, db, config.tz)
     elif args == "delq":
         await admin.send_delete_menu(message, db, config, message.from_user.id)
+    elif args == "sched":
+        await state.clear()
+        await schedule.send_schedule_menu(message, db, config, message.from_user.id)
     else:
         await state.clear()
         await message.answer(

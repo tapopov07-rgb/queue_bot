@@ -12,9 +12,10 @@ from aiogram.types import ErrorEvent
 
 from config import BASE_DIR, load_config
 from db.database import Database
-from handlers import admin, group, private, swap
+from handlers import admin, group, private, schedule, swap
 from middlewares import UserMiddleware
 from services.notifier import Notifier
+from services.planner import SchedulePlanner
 from services.queue_service import QueueService
 from services.renderer import QueueMessenger
 from services.scheduler import QueueScheduler
@@ -62,16 +63,21 @@ async def main() -> None:
     messenger = QueueMessenger(bot, db, config.tz, me.username)
     scheduler = QueueScheduler(db, service, messenger, config.tz)
     notifier = Notifier(bot, db, config.tz)
+    planner = SchedulePlanner(bot, db, service, messenger, scheduler, config.tz)
 
     dp = Dispatcher(
-        config=config, db=db, service=service, messenger=messenger,
-        scheduler=scheduler, notifier=notifier, bot_username=me.username,
+        config=config, db=db, service=service, messenger=messenger, scheduler=scheduler,
+        notifier=notifier, planner=planner, bot_username=me.username,
     )
     dp.update.outer_middleware(UserMiddleware())
     dp.errors.register(on_error)
-    dp.include_routers(private.router, admin.router, swap.router, group.router)
+    dp.include_routers(private.router, admin.router, schedule.router, swap.router, group.router)
 
     await scheduler.start()
+    planner.setup()
+    created = await planner.generate()  # догнать полночь, если бот был выключен
+    if created:
+        logging.info("При запуске созданы очереди по расписанию: %s", created)
     logging.info("Бот @%s запущен", me.username)
     try:
         await dp.start_polling(bot)

@@ -70,3 +70,7 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
     queue_cols = await _columns(conn, "queues")
     if queue_cols and "capacity" not in queue_cols:
         await conn.execute("ALTER TABLE queues ADD COLUMN capacity INTEGER NOT NULL DEFAULT 30")
+    if "weekday" in await _columns(conn, "schedule"):
+        # черновая таблица расписания из первой версии — не использовалась, заменяется новой
+        await conn.execute("UPDATE queues SET schedule_id = NULL WHERE schedule_id IS NOT NULL")
+        await conn.execute("DROP TABLE schedule")
