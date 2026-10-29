@@ -12,7 +12,7 @@
 | 4 | Деплой | ⬜ Не начат | — |
 | 5 | Модерация (после MVP, по необходимости) | ⬜ Не начат | — |
 
-**Следующий шаг:** Этап 2 → 2.1 `notifier.notify_diff`. Бот: @queues_and_helps_bot. Запуск: `cd queue_bot` → `.venv\Scripts\python.exe main.py`. Тесты: `.venv\Scripts\python.exe -m pytest -q`. ⚠️ Git: коммитов ещё нет — не задано имя автора.
+**Следующий шаг:** Этап 2 → 2.1 `notifier.notify_diff`. Бот: @queues_and_helps_bot. Запуск: `cd queue_bot` → `.venv\Scripts\python.exe main.py`. Тесты: `.venv\Scripts\python.exe -m pytest -q`.
 
 ### Как вести этот файл
 - Статусы: ⬜ не начат · 🟡 в работе · ✅ готово · ⏸ отложено.
