@@ -18,7 +18,7 @@ from aiosqlite import Row
 from db import repo
 from db.database import Database
 from services.queue_service import EntrySnap, OpResult
-from services.renderer import fmt_class_time, user_name
+from services.renderer import fmt_class_day, user_name
 
 log = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ class Notifier:
             for c in changes:
                 by_user[c.user_id].append(c)
 
-            header = f"📋 <b>{escape(queue['subject'])}</b> · {fmt_class_time(queue, self.tz)}"
+            header = f"📋 <b>{escape(queue['subject'])}</b> · {fmt_class_day(queue, self.tz)}"
             reason = self._reason(result, users)
             for user_id, user_changes in by_user.items():
                 user = users.get(user_id)
@@ -103,9 +103,16 @@ class Notifier:
             removed = result.before[result.entry_id]
             name = self._name(removed, users)
             if removed.user_id == result.actor_id and not removed.guest_name:
-                return f"🚪 {name} вышел(а) из очереди."
+                return f"🚪 {name} вышел(а) из очереди — место {removed.slot} свободно."
             by = f" ({user_name(actor)})" if actor else ""
-            return f"🚪 {name} убран(а) из очереди{by}."
+            return f"🚪 {name} убран(а) из очереди{by} — место {removed.slot} свободно."
+        if result.kind in ("join", "add_classmate", "add_by_name"):
+            added = result.after[result.entry_id]
+            return f"➕ {self._name(added, users)} занял(а) место {added.slot}."
+        if result.kind == "move":
+            moved = result.after[result.entry_id]
+            was = result.before[result.entry_id].slot
+            return f"🔢 {self._name(moved, users)} перешёл(ла) с места {was} на место {moved.slot}."
         return "Очередь изменилась."
 
     def _line(self, c: Change, result: OpResult, users: dict[int, Row]) -> str:
@@ -113,9 +120,11 @@ class Notifier:
         if c.new is None:
             return f"❌ {who}: запись убрана из очереди" if c.guest_name else "❌ Тебя убрали из очереди"
         arrow = "⬆️" if c.new < c.old else "⬇️"
+        slot = result.after[c.entry_id].slot
         ahead = next((s for s in result.after.values() if s.position == c.new - 1), None)
         ahead_text = f"за <b>{self._name(ahead, users)}</b>" if ahead else "впереди никого 🎉"
-        return f"{arrow} {who}: теперь <b>{c.new}</b>-й (был {c.old}-й) · {ahead_text}"
+        return (f"{arrow} {who}: теперь <b>{c.new}</b>-й по очереди (был {c.old}-й) · "
+                f"место {slot} · {ahead_text}")
 
     async def _deliver(self, user_id: int, text: str, retry: bool = True) -> None:
         try:

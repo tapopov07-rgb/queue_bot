@@ -14,7 +14,7 @@ from db.database import Database
 from keyboards import MyCb, SwapCb
 from services.notifier import Notifier
 from services.queue_service import QueueError, QueueService
-from services.renderer import QueueMessenger, fmt_class_time, user_name
+from services.renderer import QueueMessenger, fmt_class_day, user_name
 
 router = Router(name="swap")
 log = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ async def cb_start(callback: CallbackQuery, callback_data: SwapCb, db: Database,
             continue
         mark = "" if e["can_dm"] else " 🚫"
         name = e["guest_name"] or e["first_name"] + (f" {e['last_name']}" if e["last_name"] else "")
-        kb.button(text=f"{e['position']}. {name}{mark}"[:60],
+        kb.button(text=f"{e['slot']}. {name}{mark}"[:60],
                   callback_data=SwapCb(action="pick", a=mine["id"], b=e["id"]))
     kb.adjust(1)
     kb.row(BACK_BUTTON)
@@ -68,8 +68,8 @@ async def cb_start(callback: CallbackQuery, callback_data: SwapCb, db: Database,
     await callback.answer()
     await _safe_edit(
         callback,
-        f"🔄 <b>{escape(queue['subject'])}</b> · {fmt_class_time(queue, config.tz)}\n"
-        f"{who} на <b>{mine['position']}</b>-м месте. С кем поменяться?\n\n"
+        f"🔄 <b>{escape(queue['subject'])}</b> · {fmt_class_day(queue, config.tz)}\n"
+        f"{who} на месте <b>{mine['slot']}</b>. С кем поменяться?\n\n"
         "<i>🚫 — у человека не открыта личка с ботом, он не сможет подтвердить обмен.</i>",
         kb.as_markup(),
     )
@@ -90,17 +90,17 @@ async def cb_pick(callback: CallbackQuery, callback_data: SwapCb, bot: Bot, db: 
         dst = await repo.get_entry(conn, callback_data.b)
         queue = await repo.get_queue(conn, src["queue_id"])
 
-    requester = (f"{user_name(src)} (за {escape(src['guest_name'])}, {src['position']}-е место)"
-                 if src["guest_name"] else f"{user_name(src)} ({src['position']}-е место)")
+    requester = (f"{user_name(src)} (за {escape(src['guest_name'])}, место {src['slot']})"
+                 if src["guest_name"] else f"{user_name(src)} (место {src['slot']})")
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Принять", callback_data=SwapCb(action="accept", a=request_id))
     kb.button(text="❌ Отклонить", callback_data=SwapCb(action="decline", a=request_id))
     try:
         await bot.send_message(
             dst["user_id"],
-            f"🔄 <b>Запрос на обмен</b>\n📋 <b>{escape(queue['subject'])}</b> · {fmt_class_time(queue, config.tz)}\n\n"
+            f"🔄 <b>Запрос на обмен</b>\n📋 <b>{escape(queue['subject'])}</b> · {fmt_class_day(queue, config.tz)}\n\n"
             f"{requester} предлагает поменяться местами.\n"
-            f"{_own_label(dst)}: <b>{dst['position']}</b> → <b>{src['position']}</b>\n\n"
+            f"{_own_label(dst)}: <b>{dst['slot']}</b> → <b>{src['slot']}</b>\n\n"
             "<i>Запрос действует 30 минут.</i>",
             reply_markup=kb.as_markup(),
         )
@@ -116,7 +116,7 @@ async def cb_pick(callback: CallbackQuery, callback_data: SwapCb, bot: Bot, db: 
                                   callback_data=SwapCb(action="cancel", a=request_id).pack())
     await _safe_edit(
         callback,
-        f"⏳ Запрос на обмен отправлен: <b>{_entry_label(dst)}</b> ({dst['position']}-е место).\n"
+        f"⏳ Запрос на обмен отправлен: <b>{_entry_label(dst)}</b> (место {dst['slot']}).\n"
         "Ждём ответа — до 30 минут. Я напишу, когда он ответит.",
         InlineKeyboardBuilder().row(cancel).row(BACK_BUTTON).as_markup(),
     )
@@ -133,9 +133,10 @@ async def cb_accept(callback: CallbackQuery, callback_data: SwapCb, service: Que
         return
     messenger.refresh(res.queue_id)
     notifier.notify(res)  # инициатор обмена получит «ты теперь N-й»
-    new_pos = res.after[res.other_entry_id].position
+    mine = res.after[res.other_entry_id]
     await callback.answer("Готово")
-    await _safe_edit(callback, callback.message.html_text + f"\n\n✅ <b>Обмен выполнен</b> — теперь {new_pos}-е место.")
+    await _safe_edit(callback, callback.message.html_text +
+                     f"\n\n✅ <b>Обмен выполнен</b> — теперь место {mine.slot} ({mine.position}-й по очереди).")
 
 
 @router.callback_query(SwapCb.filter(F.action == "decline"))

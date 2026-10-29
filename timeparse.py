@@ -1,6 +1,6 @@
 """Разбор дат и времени, которые вводит ответственный."""
 import re
-from datetime import date, datetime, time, timedelta
+from datetime import date, timedelta
 
 
 class ParseError(ValueError):
@@ -33,46 +33,3 @@ def parse_date(text: str, today: date) -> date:
     if result < today:
         raise ParseError("Эта дата уже прошла")
     return result
-
-
-def parse_time(text: str) -> time:
-    m = re.fullmatch(r"(\d{1,2})[:.](\d{2})", text.strip())
-    if not m or int(m[1]) > 23 or int(m[2]) > 59:
-        raise ParseError("Не понял время. Напиши, например, <b>10:00</b>")
-    return time(int(m[1]), int(m[2]))
-
-
-def parse_duration(text: str) -> int:
-    m = re.fullmatch(r"(\d{1,3})\s*(?:мин\.?|m|min)?", text.strip().lower())
-    if not m or not 10 <= int(m[1]) <= 600:
-        raise ParseError("Напиши длительность в минутах, от 10 до 600, например <b>90</b>")
-    return int(m[1])
-
-
-def parse_opens(text: str, starts_at: datetime, now: datetime) -> datetime:
-    """Когда открыть запись:
-    «сейчас» · «за 24 ч» · «ДД.ММ ЧЧ:ММ» · «ЧЧ:ММ» (ближайшее такое время до начала пары)."""
-    t = text.strip().lower()
-    if t in ("сейчас", "now"):
-        return now
-
-    m = re.fullmatch(r"(?:за\s*)?(\d{1,3})\s*(?:ч|час|часа|часов|h)\.?", t)
-    if m:
-        return starts_at - timedelta(hours=int(m[1]))
-
-    m = re.fullmatch(r"(\S+)\s+(\d{1,2}[:.]\d{2})", t)
-    if m:
-        d = parse_date(m[1], now.date())
-        return datetime.combine(d, parse_time(m[2]), tzinfo=starts_at.tzinfo)
-
-    if re.fullmatch(r"\d{1,2}[:.]\d{2}", t):
-        tm = parse_time(t)
-        candidate = starts_at.replace(hour=tm.hour, minute=tm.minute, second=0, microsecond=0)
-        if candidate >= starts_at:
-            candidate -= timedelta(days=1)
-        return candidate
-
-    raise ParseError(
-        "Не понял. Варианты: <b>сейчас</b>, <b>за 24 ч</b>, <b>20:00</b> (накануне/в день пары) "
-        "или <b>14.10 20:00</b>"
-    )

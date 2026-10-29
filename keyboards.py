@@ -12,8 +12,14 @@ class QueueCb(CallbackData, prefix="q"):
 
 
 class MyCb(CallbackData, prefix="my"):
-    action: str  # leave | refresh
+    action: str  # leave | slot | refresh
     entry_id: int = 0
+
+
+class SlotCb(CallbackData, prefix="sl"):
+    queue_id: int
+    entry_id: int = 0  # 0 — записаться; иначе перенести эту запись
+    slot: int = 0      # 0 — первое свободное место
 
 
 class SwapCb(CallbackData, prefix="sw"):

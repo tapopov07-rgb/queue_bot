@@ -1,5 +1,6 @@
 """Ответственный: создание (диалог в личке) и удаление очередей."""
-from datetime import date, datetime, time as dtime, timedelta
+import re
+from datetime import date, datetime
 from html import escape
 
 from aiogram import F, Router
@@ -13,10 +14,11 @@ from config import Config
 from db import repo
 from db.database import Database
 from keyboards import DelCb, NewQueueCb, cancel_only, presets
-from services.queue_service import MAX_SUBJECT_LEN, QueueError, QueueService
-from services.renderer import QueueMessenger, fmt_class_time, fmt_moment, to_dt
+from services.queue_service import (DEFAULT_CAPACITY, MAX_CAPACITY, MAX_SUBJECT_LEN, QueueError,
+                                    QueueService, queue_window)
+from services.renderer import QueueMessenger, fmt_class_day, fmt_moment, to_dt
 from services.scheduler import QueueScheduler
-from timeparse import ParseError, parse_date, parse_duration, parse_opens, parse_time
+from timeparse import ParseError, parse_date
 
 router = Router(name="admin")
 router.message.filter(F.chat.type == "private")
@@ -25,9 +27,7 @@ router.message.filter(F.chat.type == "private")
 class NewQueue(StatesGroup):
     subject = State()
     date = State()
-    start = State()
-    duration = State()
-    opens = State()
+    capacity = State()
     confirm = State()
 
 
@@ -95,60 +95,30 @@ async def step_subject(text: str, reply: Message, state: FSMContext, config: Con
         return
     await state.update_data(subject=subject)
     await state.set_state(NewQueue.date)
-    await reply.answer("📅 Когда пара? Напиши дату, например <b>15.10</b>.",
+    await reply.answer("📅 Когда пара? Напиши дату, например <b>15.10</b>.\n"
+                       "<i>Запись откроется в 00:00 накануне и закроется в 23:59 дня пары.</i>",
                        reply_markup=presets(("Сегодня", "today"), ("Завтра", "tomorrow")))
 
 
 async def step_date(text: str, reply: Message, state: FSMContext, config: Config) -> None:
     d = parse_date(text, _now(config).date())
     await state.update_data(date=d.isoformat())
-    await state.set_state(NewQueue.start)
-    await reply.answer(f"🕘 Во сколько начинается пара {d:%d.%m}? Например <b>10:00</b>.",
-                       reply_markup=cancel_only())
+    await state.set_state(NewQueue.capacity)
+    await reply.answer(f"🔢 Сколько мест в очереди? Обычно {DEFAULT_CAPACITY}.",
+                       reply_markup=presets((f"{DEFAULT_CAPACITY} мест", str(DEFAULT_CAPACITY))))
 
 
-async def step_start(text: str, reply: Message, state: FSMContext, config: Config) -> None:
-    t = parse_time(text)
-    await state.update_data(start=t.strftime("%H:%M"))
-    await state.set_state(NewQueue.duration)
-    await reply.answer("⏱ Сколько длится пара (в минутах)?", reply_markup=presets(("90 мин", "90")))
-
-
-async def step_duration(text: str, reply: Message, state: FSMContext, config: Config) -> None:
-    minutes = parse_duration(text)
+async def step_capacity(text: str, reply: Message, state: FSMContext, config: Config) -> None:
+    m = re.fullmatch(r"(\d{1,3})\s*(?:мест\w*)?", text.strip().lower())
+    if not m or not 1 <= int(m[1]) <= MAX_CAPACITY:
+        raise ParseError(f"Напиши число от 1 до {MAX_CAPACITY}, например <b>{DEFAULT_CAPACITY}</b>")
+    capacity = int(m[1])
     data = await state.get_data()
-    starts = datetime.combine(date.fromisoformat(data["date"]), dtime.fromisoformat(data["start"]),
-                              tzinfo=config.tz)
-    if starts + timedelta(minutes=minutes) <= _now(config):
-        await state.set_state(NewQueue.date)
-        await reply.answer("Эта пара уже закончилась. Введи дату заново.",
-                           reply_markup=presets(("Сегодня", "today"), ("Завтра", "tomorrow")))
-        return
-    await state.update_data(duration=minutes)
-    await state.set_state(NewQueue.opens)
-    await reply.answer(
-        "🔓 Когда открыть запись?\n"
-        "• <b>сейчас</b>\n• <b>за 24 ч</b> — за сколько часов до пары\n"
-        "• <b>20:00</b> — ближайшие 20:00 перед парой\n• <b>14.10 20:00</b> — точная дата и время",
-        reply_markup=presets(("Сейчас", "now"), ("За 24 ч", "24h"), ("За 12 ч", "12h")),
-    )
-
-
-async def step_opens(text: str, reply: Message, state: FSMContext, config: Config) -> None:
-    data = await state.get_data()
-    starts = datetime.combine(date.fromisoformat(data["date"]), dtime.fromisoformat(data["start"]),
-                              tzinfo=config.tz)
-    ends = starts + timedelta(minutes=data["duration"])
-    now = _now(config)
-    opens = parse_opens(text, starts, now)
-    if opens >= ends:
-        raise ParseError("Запись должна открыться до конца пары")
-    opens = max(opens, now)
-
-    await state.update_data(starts_at=int(starts.timestamp()), ends_at=int(ends.timestamp()),
-                            opens_at=int(opens.timestamp()))
+    opens_at, starts_at, ends_at = queue_window(date.fromisoformat(data["date"]), config.tz)
+    opens_text = "сразу" if opens_at <= _now(config).timestamp() else fmt_moment(opens_at, config.tz)
+    await state.update_data(capacity=capacity, opens_at=opens_at, starts_at=starts_at, ends_at=ends_at)
     await state.set_state(NewQueue.confirm)
-    opens_text = "сразу" if opens == now else fmt_moment(int(opens.timestamp()), config.tz)
+
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Создать", callback_data=NewQueueCb(action="confirm"))
     kb.button(text="❌ Отмена", callback_data=NewQueueCb(action="cancel"))
@@ -156,8 +126,9 @@ async def step_opens(text: str, reply: Message, state: FSMContext, config: Confi
         "Проверь:\n\n"
         f"📋 <b>{escape(data['subject'])}</b>\n"
         f"👥 Поток: {escape(data['stream_title'])}\n"
-        f"🗓 {starts:%d.%m}, {starts:%H:%M}–{ends:%H:%M}\n"
-        f"🔓 Запись откроется: {opens_text}",
+        f"🗓 Пара: {fmt_class_day({'starts_at': starts_at}, config.tz)}\n"
+        f"🔢 Мест: {capacity}\n"
+        f"🔓 Запись: {opens_text} — до {fmt_moment(ends_at, config.tz)}",
         reply_markup=kb.as_markup(),
     )
 
@@ -165,9 +136,7 @@ async def step_opens(text: str, reply: Message, state: FSMContext, config: Confi
 STEPS = {
     NewQueue.subject.state: step_subject,
     NewQueue.date.state: step_date,
-    NewQueue.start.state: step_start,
-    NewQueue.duration.state: step_duration,
-    NewQueue.opens.state: step_opens,
+    NewQueue.capacity.state: step_capacity,
 }
 
 
@@ -183,9 +152,7 @@ async def _run_step(text: str, reply: Message, state: FSMContext, config: Config
 
 @router.message(NewQueue.subject, F.text)
 @router.message(NewQueue.date, F.text)
-@router.message(NewQueue.start, F.text)
-@router.message(NewQueue.duration, F.text)
-@router.message(NewQueue.opens, F.text)
+@router.message(NewQueue.capacity, F.text)
 async def on_step_text(message: Message, state: FSMContext, config: Config) -> None:
     await _run_step(message.text, message, state, config)
 
@@ -204,7 +171,8 @@ async def cb_confirm(callback: CallbackQuery, state: FSMContext, db: Database, s
     try:
         queue_id = await service.create_queue(
             stream_id=data["stream_id"], subject=data["subject"], starts_at=data["starts_at"],
-            ends_at=data["ends_at"], opens_at=data["opens_at"], actor_id=callback.from_user.id,
+            ends_at=data["ends_at"], opens_at=data["opens_at"], capacity=data["capacity"],
+            actor_id=callback.from_user.id,
         )
     except QueueError as e:
         await callback.answer(str(e), show_alert=True)
@@ -235,7 +203,7 @@ async def send_delete_menu(message: Message, db: Database, config: Config, user_
         return
     kb = InlineKeyboardBuilder()
     for q in queues:
-        kb.button(text=f"🗑 {q['subject'][:30]} · {to_dt(q['starts_at'], config.tz):%d.%m %H:%M}",
+        kb.button(text=f"🗑 {q['subject'][:30]} · {to_dt(q['starts_at'], config.tz):%d.%m}",
                   callback_data=DelCb(action="pick", queue_id=q["id"]))
     kb.button(text="❌ Отмена", callback_data=DelCb(action="cancel"))
     kb.adjust(1)
@@ -260,7 +228,7 @@ async def cb_delete_pick(callback: CallbackQuery, callback_data: DelCb, db: Data
     kb.button(text="❌ Отмена", callback_data=DelCb(action="cancel"))
     await callback.answer()
     await callback.message.edit_text(
-        f"Удалить очередь <b>{escape(queue['subject'])}</b> ({fmt_class_time(queue, config.tz)})?\n"
+        f"Удалить очередь <b>{escape(queue['subject'])}</b> ({fmt_class_day(queue, config.tz)})?\n"
         f"Записано: {total}. Это действие нельзя отменить.",
         reply_markup=kb.as_markup(),
     )

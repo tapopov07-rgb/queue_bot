@@ -163,13 +163,14 @@ async def get_admin_streams(conn: Connection, user_id: int) -> list[Row]:
 # ---------- queues ----------
 
 async def create_queue(conn: Connection, *, stream_id: int, subject: str, starts_at: int,
-                       ends_at: int, opens_at: int, status: str, created_by: int | None,
-                       schedule_id: int | None = None) -> int:
+                       ends_at: int, opens_at: int, capacity: int, status: str,
+                       created_by: int | None, schedule_id: int | None = None) -> int:
     cur = await conn.execute(
         """INSERT INTO queues (stream_id, schedule_id, subject, starts_at, ends_at, opens_at,
-                               status, created_by, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (stream_id, schedule_id, subject, starts_at, ends_at, opens_at, status, created_by, now()),
+                               capacity, status, created_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (stream_id, schedule_id, subject, starts_at, ends_at, opens_at, capacity, status, created_by,
+         now()),
     )
     return cur.lastrowid
 
@@ -216,7 +217,7 @@ _ENTRY_SELECT = """
 
 
 async def get_entries(conn: Connection, queue_id: int) -> list[Row]:
-    cur = await conn.execute(_ENTRY_SELECT + " WHERE e.queue_id = ? ORDER BY e.position", (queue_id,))
+    cur = await conn.execute(_ENTRY_SELECT + " WHERE e.queue_id = ? ORDER BY e.slot", (queue_id,))
     return list(await cur.fetchall())
 
 
@@ -234,12 +235,12 @@ async def find_entry(conn: Connection, queue_id: int, user_id: int, *, guest: bo
     return await cur.fetchone()
 
 
-async def insert_entry(conn: Connection, *, queue_id: int, position: int, user_id: int,
+async def insert_entry(conn: Connection, *, queue_id: int, slot: int, user_id: int,
                        guest_name: str | None, added_by: int) -> int:
     cur = await conn.execute(
-        """INSERT INTO queue_entries (queue_id, position, user_id, guest_name, added_by, created_at)
+        """INSERT INTO queue_entries (queue_id, slot, user_id, guest_name, added_by, created_at)
            VALUES (?, ?, ?, ?, ?, ?)""",
-        (queue_id, position, user_id, guest_name, added_by, now()),
+        (queue_id, slot, user_id, guest_name, added_by, now()),
     )
     return cur.lastrowid
 
@@ -248,11 +249,20 @@ async def delete_entry(conn: Connection, entry_id: int) -> None:
     await conn.execute("DELETE FROM queue_entries WHERE id = ?", (entry_id,))
 
 
-async def set_positions(conn: Connection, positions: list[tuple[int, int]]) -> None:
-    """positions: [(entry_id, position), ...]"""
-    await conn.executemany(
-        "UPDATE queue_entries SET position = ? WHERE id = ?", [(p, e) for e, p in positions]
-    )
+async def get_occupied_slots(conn: Connection, queue_id: int) -> set[int]:
+    cur = await conn.execute("SELECT slot FROM queue_entries WHERE queue_id = ?", (queue_id,))
+    return {r["slot"] for r in await cur.fetchall()}
+
+
+async def set_slot(conn: Connection, entry_id: int, slot: int) -> None:
+    await conn.execute("UPDATE queue_entries SET slot = ? WHERE id = ?", (slot, entry_id))
+
+
+async def swap_slots(conn: Connection, entry_a: Row, entry_b: Row) -> None:
+    # через временный отрицательный номер: номер места уникален в очереди
+    await set_slot(conn, entry_a["id"], -entry_a["slot"])
+    await set_slot(conn, entry_b["id"], entry_a["slot"])
+    await set_slot(conn, entry_a["id"], entry_b["slot"])
 
 
 async def count_added_others(conn: Connection, queue_id: int, user_id: int) -> int:
@@ -268,21 +278,25 @@ async def count_added_others(conn: Connection, queue_id: int, user_id: int) -> i
 async def get_user_active_entries(conn: Connection, user_id: int) -> list[Row]:
     """Записи пользователя и записи, которые он сделал за других, в активных очередях."""
     cur = await conn.execute(
-        """SELECT e.id AS entry_id, e.position, e.guest_name, e.user_id, e.added_by,
+        """SELECT e.id AS entry_id, e.slot, e.guest_name, e.user_id, e.added_by,
                   u.first_name, u.last_name,
                   a.first_name AS adder_first_name, a.last_name AS adder_last_name,
-                  q.id AS queue_id, q.subject, q.starts_at, q.ends_at, q.opens_at, q.status,
+                  q.id AS queue_id, q.subject, q.starts_at, q.ends_at, q.opens_at, q.status, q.capacity,
                   (SELECT COUNT(*) FROM queue_entries x WHERE x.queue_id = q.id) AS total,
+                  (SELECT COUNT(*) FROM queue_entries x
+                   WHERE x.queue_id = q.id AND x.slot <= e.slot) AS rank,
                   p.guest_name AS prev_guest_name, pu.first_name AS prev_first_name,
                   pu.last_name AS prev_last_name
            FROM queue_entries e
            JOIN queues q ON q.id = e.queue_id
            JOIN users u ON u.id = e.user_id
            JOIN users a ON a.id = e.added_by
-           LEFT JOIN queue_entries p ON p.queue_id = e.queue_id AND p.position = e.position - 1
+           LEFT JOIN queue_entries p ON p.id = (SELECT y.id FROM queue_entries y
+                                                WHERE y.queue_id = e.queue_id AND y.slot < e.slot
+                                                ORDER BY y.slot DESC LIMIT 1)
            LEFT JOIN users pu ON pu.id = p.user_id
            WHERE (e.user_id = ? OR e.added_by = ?) AND q.status IN (?, ?)
-           ORDER BY q.starts_at, q.id, e.position""",
+           ORDER BY q.starts_at, q.id, e.slot""",
         (user_id, user_id, *ACTIVE_STATUSES),
     )
     return list(await cur.fetchall())

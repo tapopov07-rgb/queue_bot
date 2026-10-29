@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS queues (
     starts_at    INTEGER NOT NULL,
     ends_at      INTEGER NOT NULL,
     opens_at     INTEGER NOT NULL,
+    capacity     INTEGER NOT NULL DEFAULT 30,       -- число мест в листе
     status       TEXT    NOT NULL CHECK (status IN ('scheduled', 'open', 'closed')),
     created_by   INTEGER REFERENCES users(id),      -- NULL — создана планировщиком
     created_at   INTEGER NOT NULL
@@ -75,7 +76,7 @@ CREATE INDEX IF NOT EXISTS ix_queues_status ON queues(status);
 CREATE TABLE IF NOT EXISTS queue_entries (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     queue_id    INTEGER NOT NULL REFERENCES queues(id) ON DELETE CASCADE,
-    position    INTEGER NOT NULL,                  -- 1..N без пропусков
+    slot        INTEGER NOT NULL,                  -- номер места в листе 1..capacity, бывают пропуски
     user_id     INTEGER NOT NULL REFERENCES users(id),  -- владелец записи (получает уведомления, меняется)
     guest_name  TEXT,                              -- человек не из списка, вписан текстом; владелец — тот, кто вписал
     added_by    INTEGER NOT NULL REFERENCES users(id),  -- кто создал запись (сам или записавший одногруппник)
@@ -86,6 +87,7 @@ CREATE TABLE IF NOT EXISTS queue_entries (
 CREATE UNIQUE INDEX IF NOT EXISTS ux_entry_self  ON queue_entries(queue_id, user_id) WHERE guest_name IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_entry_guest ON queue_entries(queue_id, user_id) WHERE guest_name IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_entries_user ON queue_entries(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_entry_slot ON queue_entries(queue_id, slot);
 
 CREATE TABLE IF NOT EXISTS queue_messages (
     queue_id    INTEGER NOT NULL REFERENCES queues(id) ON DELETE CASCADE,

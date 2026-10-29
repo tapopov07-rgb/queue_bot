@@ -28,6 +28,7 @@ class Database:
         conn = await self._open()
         try:
             await conn.execute("PRAGMA journal_mode = WAL")
+            await _migrate(conn)
             await conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
         finally:
             await conn.close()
@@ -54,3 +55,18 @@ class Database:
                 await conn.execute("COMMIT")
             finally:
                 await conn.close()
+
+
+async def _columns(conn: aiosqlite.Connection, table: str) -> set[str]:
+    cur = await conn.execute(f"PRAGMA table_info({table})")
+    return {row[1] for row in await cur.fetchall()}
+
+
+async def _migrate(conn: aiosqlite.Connection) -> None:
+    """Обновить базу, созданную старой версией бота. На новой базе ничего не делает."""
+    if "position" in await _columns(conn, "queue_entries"):
+        # места стали листом с номерами: старые позиции 1..N становятся номерами мест
+        await conn.execute("ALTER TABLE queue_entries RENAME COLUMN position TO slot")
+    queue_cols = await _columns(conn, "queues")
+    if queue_cols and "capacity" not in queue_cols:
+        await conn.execute("ALTER TABLE queues ADD COLUMN capacity INTEGER NOT NULL DEFAULT 30")

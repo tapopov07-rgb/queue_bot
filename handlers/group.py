@@ -11,7 +11,7 @@ from db.database import Database
 from keyboards import QueueCb, deep_link
 from services.notifier import Notifier
 from services.queue_service import QueueError, QueueService
-from services.renderer import QueueMessenger, user_name
+from services.renderer import QueueMessenger, describe_place, user_name
 
 router = Router(name="group")
 GROUPS = {"group", "supergroup"}
@@ -76,24 +76,18 @@ async def group_deletequeue(message: Message, bot_username: str) -> None:
 
 @router.callback_query(QueueCb.filter(F.action == "join"))
 async def cb_join(callback: CallbackQuery, callback_data: QueueCb, db: Database, service: QueueService,
-                  messenger: QueueMessenger, bot_username: str) -> None:
+                  messenger: QueueMessenger, notifier: Notifier, bot_username: str) -> None:
     try:
-        res = await service.join(callback_data.queue_id, callback.from_user.id)
+        res = await service.join(callback_data.queue_id, callback.from_user.id)  # первое свободное место
     except QueueError as e:
         await callback.answer(str(e), show_alert=True)
         return
     messenger.refresh(res.queue_id)
-    ahead = next((s for s in res.after.values() if s.position == res.position - 1), None)
+    notifier.notify(res)  # первое свободное может оказаться впереди кого-то
     async with db.read() as conn:
         user = await repo.get_user(conn, callback.from_user.id)
-        ahead_user = await repo.get_user(conn, ahead.user_id) if ahead else None
-    text = f"✅ Ты записан — место {res.position}"
-    if ahead:
-        # всплывающее окно — простой текст, без HTML
-        name = ahead.guest_name or " ".join(filter(None, (ahead_user["first_name"], ahead_user["last_name"])))
-        text += f", за {name}"
-    else:
-        text += ", впереди никого"
+    # всплывающее окно — простой текст, без HTML
+    text = f"✅ Ты записан: {await describe_place(db, res, html=False)}"
     if not user["can_dm"]:
         text += f"\n\nЧтобы получать уведомления о сдвиге места, открой @{bot_username} и нажми «Start»"
     await callback.answer(text, show_alert=not user["can_dm"])

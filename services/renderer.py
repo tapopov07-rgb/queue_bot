@@ -29,9 +29,10 @@ def fmt_moment(ts: int, tz: ZoneInfo) -> str:
     return f"{WEEKDAYS[d.weekday()]}, {d:%d.%m} в {d:%H:%M}"
 
 
-def fmt_class_time(queue: Row, tz: ZoneInfo) -> str:
-    s, e = to_dt(queue["starts_at"], tz), to_dt(queue["ends_at"], tz)
-    return f"{WEEKDAYS[s.weekday()]}, {s:%d.%m} · {s:%H:%M}–{e:%H:%M}"
+def fmt_class_day(queue: Row, tz: ZoneInfo) -> str:
+    """День пары: «ср, 30.10»."""
+    d = to_dt(queue["starts_at"], tz)
+    return f"{WEEKDAYS[d.weekday()]}, {d:%d.%m}"
 
 
 def user_name(row: Row) -> str:
@@ -45,21 +46,44 @@ def entry_name(entry: Row) -> str:
     return user_name(entry)
 
 
+async def describe_place(db: Database, result, *, html: bool = True) -> str:
+    """«место 6 · 4-й по очереди · за Иван Петров» для записи из результата операции."""
+    ahead = next((s for s in result.after.values() if s.position == result.position - 1), None)
+    if ahead is None:
+        ahead_text = "впереди никого"
+    else:
+        if ahead.guest_name:
+            name = ahead.guest_name
+        else:
+            async with db.read() as conn:
+                user = await repo.get_user(conn, ahead.user_id)
+            name = user["first_name"] + (f" {user['last_name']}" if user["last_name"] else "")
+        ahead_text = f"за <b>{escape(name)}</b>" if html else f"за {name}"
+    return f"место {result.slot} · {result.position}-й по очереди · {ahead_text}"
+
+
 def render_queue(queue: Row, entries: list[Row], tz: ZoneInfo) -> str:
+    """Занятые места по порядку номеров; пустые места между ними — одной строкой «свободно: N»."""
+    free = queue["capacity"] - len(entries)
     status = {
         "scheduled": f"⏳ Запись откроется {fmt_moment(queue['opens_at'], tz)}",
-        "open": "🟢 Запись открыта",
-        "closed": "🔒 Очередь закрыта",
+        "open": f"🟢 Запись до {fmt_moment(queue['ends_at'], tz)} · свободно {free} из {queue['capacity']}",
+        "closed": "🔒 Запись закрыта",
     }[queue["status"]]
     lines = [
         f"📋 <b>{escape(queue['subject'])}</b>",
-        f"🗓 {fmt_class_time(queue, tz)}",
+        f"🗓 {fmt_class_day(queue, tz)}",
         status,
         "",
     ]
-    if entries:
-        lines += [f"{e['position']}. {entry_name(e)}" for e in entries]
-    elif queue["status"] != "scheduled":
+    prev_slot = 0
+    for e in entries:  # по возрастанию номера места
+        gap = e["slot"] - prev_slot - 1
+        if gap > 0:
+            lines.append(f"<i>   ┄ свободно: {gap} ┄</i>")
+        lines.append(f"{e['slot']}. {entry_name(e)}")
+        prev_slot = e["slot"]
+    if not entries and queue["status"] != "scheduled":
         lines.append("<i>Пока никто не записался</i>")
     return "\n".join(lines)
 
@@ -74,9 +98,10 @@ def queue_keyboard(queue: Row, bot_username: str, tz: ZoneInfo) -> InlineKeyboar
     elif queue["status"] == "open":
         kb.button(text="✅ Записаться", callback_data=QueueCb(action="join", queue_id=qid))
         kb.button(text="🚪 Выйти", callback_data=QueueCb(action="leave", queue_id=qid))
+        kb.button(text="🔢 Выбрать место", url=deep_link(bot_username, f"pick_{qid}"))
         kb.button(text="👥 Записать одногруппника", url=deep_link(bot_username, f"add_{qid}"))
         kb.button(text="📋 Мои очереди", url=deep_link(bot_username, "my"))
-        kb.adjust(2, 1, 1)
+        kb.adjust(2, 1, 1, 1)
     else:
         return None
     return kb.as_markup()
@@ -129,7 +154,7 @@ class QueueMessenger:
         task = self._pending.pop(queue["id"], None)
         if task:
             task.cancel()
-        text = f"🗑 Очередь <b>{escape(queue['subject'])}</b> ({fmt_class_time(queue, self.tz)}) удалена."
+        text = f"🗑 Очередь <b>{escape(queue['subject'])}</b> ({fmt_class_day(queue, self.tz)}) удалена."
         for m in messages:
             try:
                 await self.bot.edit_message_text(text=text, chat_id=m["chat_id"], message_id=m["message_id"],
