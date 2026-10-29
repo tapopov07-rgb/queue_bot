@@ -8,6 +8,7 @@ from db import repo
 
 class Action(StrEnum):
     CREATE_QUEUE = "create_queue"
+    DELETE_QUEUE = "delete_queue"
     JOIN = "join"
     LEAVE = "leave"    # убрать свою запись или запись, которую сделал сам
     SWAP = "swap"
@@ -18,7 +19,7 @@ class Action(StrEnum):
 async def can(conn: Connection, user_id: int, action: Action, *,
               stream_id: int | None = None, entry: Row | None = None) -> bool:
     match action:
-        case Action.CREATE_QUEUE:
+        case Action.CREATE_QUEUE | Action.DELETE_QUEUE:
             return stream_id is not None and await repo.is_stream_admin(conn, stream_id, user_id)
         case Action.JOIN | Action.SWAP:
             return True

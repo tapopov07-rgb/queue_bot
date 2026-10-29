@@ -36,6 +36,7 @@ HELP_TEXT = (
     "• /myqueues — твои очереди и места\n\n"
     "<b>Ответственным</b>\n"
     "• /newqueue — создать очередь\n"
+    "• /deletequeue — удалить очередь\n"
     "• /cancel — отменить ввод"
 )
 
@@ -57,6 +58,8 @@ async def cmd_start(message: Message, command: CommandObject, state: FSMContext,
         await admin.begin(message, state, db, message.from_user.id, int(args[5:]))
     elif args == "my":
         await send_my_queues(message, db, config.tz)
+    elif args == "delq":
+        await admin.send_delete_menu(message, db, config, message.from_user.id)
     else:
         await state.clear()
         await message.answer(

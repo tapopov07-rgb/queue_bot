@@ -124,6 +124,19 @@ class QueueMessenger:
                 await repo.save_queue_message(conn, queue_id, chat_id, message_id)
         return len(sent)
 
+    async def mark_deleted(self, queue: Row, messages: list[Row]) -> None:
+        """Заменить сообщения удалённой очереди на «удалена» и убрать кнопки."""
+        task = self._pending.pop(queue["id"], None)
+        if task:
+            task.cancel()
+        text = f"🗑 Очередь <b>{escape(queue['subject'])}</b> ({fmt_class_time(queue, self.tz)}) удалена."
+        for m in messages:
+            try:
+                await self.bot.edit_message_text(text=text, chat_id=m["chat_id"], message_id=m["message_id"],
+                                                 reply_markup=None)
+            except (TelegramBadRequest, TelegramForbiddenError) as e:
+                log.warning("Не удалось пометить удалённую очередь %s в чате %s: %s", queue["id"], m["chat_id"], e)
+
     def refresh(self, queue_id: int) -> None:
         """Запланировать обновление сообщений очереди (можно вызывать сколько угодно часто)."""
         if queue_id in self._pending:

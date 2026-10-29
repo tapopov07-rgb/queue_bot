@@ -67,6 +67,13 @@ async def group_newqueue(message: Message, db: Database, bot_username: str) -> N
     await message.reply("Очередь создаётся в личке со мной:", reply_markup=kb.as_markup())
 
 
+@router.message(Command("deletequeue"), F.chat.type.in_(GROUPS))
+async def group_deletequeue(message: Message, bot_username: str) -> None:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 Удалить очередь", url=deep_link(bot_username, "delq"))
+    await message.reply("Очереди удаляются в личке со мной (только ответственный):", reply_markup=kb.as_markup())
+
+
 @router.callback_query(QueueCb.filter(F.action == "join"))
 async def cb_join(callback: CallbackQuery, callback_data: QueueCb, db: Database, service: QueueService,
                   messenger: QueueMessenger, bot_username: str) -> None:

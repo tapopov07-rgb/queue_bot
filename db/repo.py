@@ -183,6 +183,23 @@ async def set_queue_status(conn: Connection, queue_id: int, status: str) -> None
     await conn.execute("UPDATE queues SET status = ? WHERE id = ?", (status, queue_id))
 
 
+async def get_admin_active_queues(conn: Connection, user_id: int) -> list[Row]:
+    """Активные очереди потоков, где пользователь — ответственный."""
+    cur = await conn.execute(
+        """SELECT q.*, (SELECT COUNT(*) FROM queue_entries e WHERE e.queue_id = q.id) AS total
+           FROM queues q JOIN stream_admins sa ON sa.stream_id = q.stream_id
+           WHERE sa.user_id = ? AND q.status IN (?, ?)
+           ORDER BY q.starts_at, q.id""",
+        (user_id, *ACTIVE_STATUSES),
+    )
+    return list(await cur.fetchall())
+
+
+async def delete_queue(conn: Connection, queue_id: int) -> None:
+    # записи, сообщения, журнал и запросы на обмен удалятся каскадом
+    await conn.execute("DELETE FROM queues WHERE id = ?", (queue_id,))
+
+
 async def get_active_queues(conn: Connection) -> list[Row]:
     cur = await conn.execute(
         "SELECT * FROM queues WHERE status IN (?, ?) ORDER BY starts_at", ACTIVE_STATUSES

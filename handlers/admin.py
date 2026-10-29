@@ -1,4 +1,4 @@
-"""Ответственный: ручное создание очереди (диалог в личке)."""
+"""Ответственный: создание (диалог в личке) и удаление очередей."""
 from datetime import date, datetime, time as dtime, timedelta
 from html import escape
 
@@ -12,9 +12,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import Config
 from db import repo
 from db.database import Database
-from keyboards import NewQueueCb, cancel_only, presets
+from keyboards import DelCb, NewQueueCb, cancel_only, presets
 from services.queue_service import MAX_SUBJECT_LEN, QueueError, QueueService
-from services.renderer import QueueMessenger, fmt_moment
+from services.renderer import QueueMessenger, fmt_class_time, fmt_moment, to_dt
 from services.scheduler import QueueScheduler
 from timeparse import ParseError, parse_date, parse_duration, parse_opens, parse_time
 
@@ -223,3 +223,64 @@ async def cb_confirm(callback: CallbackQuery, state: FSMContext, db: Database, s
             "⚠️ Очередь создана, но я не смог отправить её ни в один чат потока. "
             "Проверь, что я всё ещё состою в группе."
         )
+
+
+# ---------- удаление очереди ----------
+
+async def send_delete_menu(message: Message, db: Database, config: Config, user_id: int) -> None:
+    async with db.read() as conn:
+        queues = await repo.get_admin_active_queues(conn, user_id)
+    if not queues:
+        await message.answer("Нет активных очередей, которые ты можешь удалить.")
+        return
+    kb = InlineKeyboardBuilder()
+    for q in queues:
+        kb.button(text=f"🗑 {q['subject'][:30]} · {to_dt(q['starts_at'], config.tz):%d.%m %H:%M}",
+                  callback_data=DelCb(action="pick", queue_id=q["id"]))
+    kb.button(text="❌ Отмена", callback_data=DelCb(action="cancel"))
+    kb.adjust(1)
+    await message.answer("Какую очередь удалить?", reply_markup=kb.as_markup())
+
+
+@router.message(Command("deletequeue"))
+async def cmd_deletequeue(message: Message, db: Database, config: Config) -> None:
+    await send_delete_menu(message, db, config, message.from_user.id)
+
+
+@router.callback_query(DelCb.filter(F.action == "pick"))
+async def cb_delete_pick(callback: CallbackQuery, callback_data: DelCb, db: Database, config: Config) -> None:
+    async with db.read() as conn:
+        queue = await repo.get_queue(conn, callback_data.queue_id)
+        total = len(await repo.get_entries(conn, callback_data.queue_id)) if queue else 0
+    if queue is None:
+        await callback.answer("Очередь уже удалена", show_alert=True)
+        return
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 Да, удалить", callback_data=DelCb(action="confirm", queue_id=queue["id"]))
+    kb.button(text="❌ Отмена", callback_data=DelCb(action="cancel"))
+    await callback.answer()
+    await callback.message.edit_text(
+        f"Удалить очередь <b>{escape(queue['subject'])}</b> ({fmt_class_time(queue, config.tz)})?\n"
+        f"Записано: {total}. Это действие нельзя отменить.",
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.callback_query(DelCb.filter(F.action == "confirm"))
+async def cb_delete_confirm(callback: CallbackQuery, callback_data: DelCb, service: QueueService,
+                            messenger: QueueMessenger, scheduler: QueueScheduler) -> None:
+    try:
+        queue, messages = await service.delete_queue(callback_data.queue_id, callback.from_user.id)
+    except QueueError as e:
+        await callback.answer(str(e), show_alert=True)
+        return
+    scheduler.unplan(queue["id"])
+    await callback.answer("Удалено")
+    await callback.message.edit_text(f"🗑 Очередь <b>{escape(queue['subject'])}</b> удалена.")
+    await messenger.mark_deleted(queue, messages)
+
+
+@router.callback_query(DelCb.filter(F.action == "cancel"))
+async def cb_delete_cancel(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.edit_text("Отменено.")

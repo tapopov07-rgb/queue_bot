@@ -27,6 +27,11 @@ class AddCb(CallbackData, prefix="add"):
     user_id: int  # 0 — отмена
 
 
+class DelCb(CallbackData, prefix="del"):
+    action: str  # pick | confirm | cancel
+    queue_id: int = 0
+
+
 class NewQueueCb(CallbackData, prefix="nq"):
     action: str  # stream | preset | confirm | cancel
     value: str = ""

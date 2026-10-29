@@ -3,6 +3,7 @@
 Каждая операция: транзакция под общим write lock + запись в queue_events +
 снимок позиций «до/после» (по нему notifier решает, кого уведомить).
 """
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -12,6 +13,8 @@ from aiosqlite import Connection, Row
 from db import repo
 from db.database import Database
 from services.permissions import Action, can
+
+log = logging.getLogger(__name__)
 
 MAX_SUBJECT_LEN = 60
 MAX_GUEST_NAME_LEN = 40
@@ -85,6 +88,20 @@ class QueueService:
             await repo.log_event(conn, queue_id, actor_id, "create",
                                  {"subject": subject, "starts_at": starts_at, "opens_at": opens_at})
         return queue_id
+
+    async def delete_queue(self, queue_id: int, actor_id: int) -> tuple[Row, list[Row]]:
+        """Удалить очередь целиком. Возвращает очередь и её сообщения в группах
+        (их нужно пометить «удалена» — после удаления из БД они уже не найдутся)."""
+        async with self.db.transaction() as conn:
+            queue = await repo.get_queue(conn, queue_id)
+            if queue is None:
+                raise QueueError("Очередь уже удалена")
+            if not await can(conn, actor_id, Action.DELETE_QUEUE, stream_id=queue["stream_id"]):
+                raise QueueError("Удалять очереди может только ответственный потока")
+            messages = await repo.get_queue_messages(conn, queue_id)
+            await repo.delete_queue(conn, queue_id)
+        log.info("Очередь %s «%s» удалена пользователем %s", queue_id, queue["subject"], actor_id)
+        return queue, messages
 
     async def open_queue(self, queue_id: int) -> bool:
         async with self.db.transaction() as conn:

@@ -43,6 +43,12 @@ class QueueScheduler:
             self._add(f"open:{qid}", self._open, qid, max(queue["opens_at"], now + 1))
         self._add(f"close:{qid}", self._close, qid, max(queue["ends_at"], now + 2))
 
+    def unplan(self, queue_id: int) -> None:
+        """Снять задачи удалённой очереди."""
+        for job_id in (f"open:{queue_id}", f"close:{queue_id}"):
+            if self.scheduler.get_job(job_id):
+                self.scheduler.remove_job(job_id)
+
     def _add(self, job_id: str, func, queue_id: int, ts: float) -> None:
         self.scheduler.add_job(
             func, "date", run_date=datetime.fromtimestamp(ts, self.tz), args=[queue_id],

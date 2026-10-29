@@ -131,3 +131,22 @@ async def test_events_logged(env):
     async with db.read() as conn:
         cur = await conn.execute("SELECT type FROM queue_events WHERE queue_id = ? ORDER BY id", (q,))
         assert [r["type"] for r in await cur.fetchall()] == ["create", "join", "leave"]
+
+
+async def test_delete_queue(env):
+    db, service, _, q = env
+    a = await service.join(q, 2)
+    b = await service.join(q, 3)
+    await service.request_swap(a.entry_id, b.entry_id, actor_id=2)
+    with pytest.raises(QueueError):  # не ответственный
+        await service.delete_queue(q, actor_id=2)
+    queue, _ = await service.delete_queue(q, actor_id=ADMIN)
+    assert queue["subject"] == "Матан"
+    async with db.read() as conn:
+        assert await repo.get_queue(conn, q) is None
+        assert await repo.get_user_active_entries(conn, 2) == []
+        for table in ("queue_entries", "queue_events", "swap_requests"):
+            cur = await conn.execute(f"SELECT COUNT(*) FROM {table}")
+            assert (await cur.fetchone())[0] == 0, table
+    with pytest.raises(QueueError):
+        await service.delete_queue(q, actor_id=ADMIN)
