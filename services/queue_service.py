@@ -1,8 +1,10 @@
 """Единственная точка изменения очередей. Хендлеры никогда не пишут в queue_entries напрямую.
 
 Каждая операция: транзакция под общим write lock + запись в queue_events +
-снимок позиций «до/после» (по нему notifier на этапе 2 решит, кого уведомить).
+снимок позиций «до/после» (по нему notifier решает, кого уведомить).
 """
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 from aiosqlite import Connection, Row
@@ -13,23 +15,44 @@ from services.permissions import Action, can
 
 MAX_SUBJECT_LEN = 60
 MAX_GUEST_NAME_LEN = 40
-MAX_ADDED_OTHERS = 1  # сколько других людей один студент может записать в очередь
+MAX_ADDED_OTHERS = 1        # сколько других людей один студент может записать в очередь
+SWAP_REQUEST_TTL = 30 * 60  # запрос на обмен действует 30 минут
 
 
 class QueueError(Exception):
     """Ошибка, текст которой можно показать пользователю."""
 
 
+class _SwapExpired(QueueError):
+    """Запрос устарел: пометить его expired нужно отдельной транзакцией,
+    потому что транзакция с ошибкой откатывается целиком."""
+
+    def __init__(self, request_id: int) -> None:
+        super().__init__("Запрос устарел (действует 30 минут)")
+        self.request_id = request_id
+
+
+@dataclass(frozen=True)
+class EntrySnap:
+    position: int
+    user_id: int            # владелец записи
+    guest_name: str | None  # вписан по имени
+
+
 @dataclass
 class OpResult:
     queue_id: int
+    kind: str                      # join | add_classmate | add_by_name | leave | remove | swap
+    actor_id: int | None
     entry_id: int | None = None
-    before: dict[int, int] = field(default_factory=dict)  # entry_id -> position
-    after: dict[int, int] = field(default_factory=dict)
+    other_entry_id: int | None = None  # второй участник обмена
+    before: dict[int, EntrySnap] = field(default_factory=dict)
+    after: dict[int, EntrySnap] = field(default_factory=dict)
 
     @property
     def position(self) -> int | None:
-        return self.after.get(self.entry_id) if self.entry_id else None
+        snap = self.after.get(self.entry_id) if self.entry_id else None
+        return snap.position if snap else None
 
 
 class QueueService:
@@ -78,6 +101,7 @@ class QueueService:
             if queue is None or queue["status"] == "closed":
                 return False
             await repo.set_queue_status(conn, queue_id, "closed")
+            await repo.expire_queue_swaps(conn, queue_id)
             await repo.log_event(conn, queue_id, None, "close")
         return True
 
@@ -135,6 +159,64 @@ class QueueService:
                 raise QueueError("Тебя нет в этой очереди")
             return await self._remove(conn, entry, user_id)
 
+    # ---------- обмен ----------
+
+    async def request_swap(self, from_entry_id: int, to_entry_id: int, actor_id: int) -> int:
+        """Создать запрос на обмен. Возвращает id запроса. Предыдущий запрос с этого места отменяется."""
+        async with self.db.transaction() as conn:
+            src = await repo.get_entry(conn, from_entry_id)
+            dst = await repo.get_entry(conn, to_entry_id)
+            if src is None or dst is None or src["queue_id"] != dst["queue_id"]:
+                raise QueueError("Этой записи уже нет в очереди")
+            await self._get_open_queue(conn, src["queue_id"])
+            if src["user_id"] != actor_id or not await can(conn, actor_id, Action.SWAP, entry=src):
+                raise QueueError("Меняться можно только своим местом")
+            if dst["user_id"] == actor_id:
+                raise QueueError("Это тоже твоё место")
+            if not dst["can_dm"]:
+                raise QueueError("У этого человека не открыта личка с ботом — он не сможет "
+                                 "подтвердить обмен")
+            await repo.cancel_pending_swaps_from(conn, from_entry_id)
+            request_id = await repo.create_swap_request(conn, src["queue_id"], from_entry_id, to_entry_id)
+            await repo.log_event(conn, src["queue_id"], actor_id, "swap_request",
+                                 {"request_id": request_id, "from_entry": from_entry_id, "to_entry": to_entry_id})
+        return request_id
+
+    async def accept_swap(self, request_id: int, actor_id: int) -> OpResult:
+        async with self._expiring(), self.db.transaction() as conn:
+            req, src, dst = await self._get_pending_swap(conn, request_id)
+            if dst["user_id"] != actor_id:
+                raise QueueError("Этот запрос адресован не тебе")
+            await self._get_open_queue(conn, req["queue_id"])
+
+            before = await self._snapshot(conn, req["queue_id"])
+            order = self._order(before)
+            i, j = order.index(src["id"]), order.index(dst["id"])
+            order[i], order[j] = order[j], order[i]
+            await self._reposition(conn, order)
+            await repo.set_swap_status(conn, request_id, "accepted")
+            after = await self._snapshot(conn, req["queue_id"])
+            await self._expire_moved_swaps(conn, before, after)
+            await repo.log_event(conn, req["queue_id"], actor_id, "swap",
+                                 {"request_id": request_id, "from_entry": src["id"], "to_entry": dst["id"]})
+        return OpResult(req["queue_id"], "swap", actor_id, src["id"], dst["id"], before, after)
+
+    async def decline_swap(self, request_id: int, actor_id: int) -> Row:
+        async with self._expiring(), self.db.transaction() as conn:
+            req, _, dst = await self._get_pending_swap(conn, request_id)
+            if dst["user_id"] != actor_id:
+                raise QueueError("Этот запрос адресован не тебе")
+            await repo.set_swap_status(conn, request_id, "declined")
+        return req
+
+    async def cancel_swap(self, request_id: int, actor_id: int) -> Row:
+        async with self._expiring(), self.db.transaction() as conn:
+            req, src, _ = await self._get_pending_swap(conn, request_id)
+            if src["user_id"] != actor_id:
+                raise QueueError("Это не твой запрос")
+            await repo.set_swap_status(conn, request_id, "cancelled")
+        return req
+
     # ---------- внутреннее ----------
 
     async def _get_open_queue(self, conn: Connection, queue_id: int) -> Row:
@@ -147,12 +229,36 @@ class QueueService:
             raise QueueError("Очередь уже закрыта")
         return queue
 
+    async def _get_pending_swap(self, conn: Connection, request_id: int) -> tuple[Row, Row, Row]:
+        req = await repo.get_swap_request(conn, request_id)
+        if req is None or req["status"] != "pending":
+            raise QueueError("Запрос уже неактуален")
+        if req["created_at"] + SWAP_REQUEST_TTL < repo.now():
+            raise _SwapExpired(request_id)
+        src = await repo.get_entry(conn, req["from_entry_id"])
+        dst = await repo.get_entry(conn, req["to_entry_id"])
+        return req, src, dst
+
+    @asynccontextmanager
+    async def _expiring(self) -> AsyncIterator[None]:
+        try:
+            yield
+        except _SwapExpired as e:
+            async with self.db.transaction() as conn:
+                await repo.set_swap_status(conn, e.request_id, "expired")
+            raise
+
     async def _check_add_limit(self, conn: Connection, queue_id: int, actor_id: int) -> None:
         if await repo.count_added_others(conn, queue_id, actor_id) >= MAX_ADDED_OTHERS:
             raise QueueError("Ты уже записал одного человека в эту очередь — больше нельзя")
 
-    async def _snapshot(self, conn: Connection, queue_id: int) -> dict[int, int]:
-        return {e["id"]: e["position"] for e in await repo.get_entries(conn, queue_id)}
+    async def _snapshot(self, conn: Connection, queue_id: int) -> dict[int, EntrySnap]:
+        return {e["id"]: EntrySnap(e["position"], e["user_id"], e["guest_name"])
+                for e in await repo.get_entries(conn, queue_id)}
+
+    @staticmethod
+    def _order(snapshot: dict[int, EntrySnap]) -> list[int]:
+        return [e for e, _ in sorted(snapshot.items(), key=lambda kv: kv[1].position)]
 
     async def _append(self, conn: Connection, queue_id: int, *, user_id: int,
                       guest_name: str | None, actor_id: int) -> OpResult:
@@ -163,15 +269,15 @@ class QueueService:
         )
         after = await self._snapshot(conn, queue_id)
         if guest_name:
-            event = "add_by_name"
+            kind = "add_by_name"
         elif user_id != actor_id:
-            event = "add_classmate"
+            kind = "add_classmate"
         else:
-            event = "join"
-        await repo.log_event(conn, queue_id, actor_id, event,
+            kind = "join"
+        await repo.log_event(conn, queue_id, actor_id, kind,
                              {"entry_id": entry_id, "user_id": user_id, "guest_name": guest_name,
-                              "position": after[entry_id]})
-        return OpResult(queue_id, entry_id, before, after)
+                              "position": after[entry_id].position})
+        return OpResult(queue_id, kind, actor_id, entry_id, None, before, after)
 
     async def _remove(self, conn: Connection, entry: Row, actor_id: int) -> OpResult:
         queue_id = entry["queue_id"]
@@ -183,16 +289,22 @@ class QueueService:
             raise QueueError("Это не твоя запись")
 
         before = await self._snapshot(conn, queue_id)
-        await repo.delete_entry(conn, entry["id"])
-        order = [e for e, _ in sorted(before.items(), key=lambda kv: kv[1]) if e != entry["id"]]
-        await self._reposition(conn, order)
+        await repo.delete_entry(conn, entry["id"])  # запросы на обмен с ней удалятся каскадом
+        await self._reposition(conn, [e for e in self._order(before) if e != entry["id"]])
         after = await self._snapshot(conn, queue_id)
+        await self._expire_moved_swaps(conn, before, after)
         await repo.log_event(conn, queue_id, actor_id, action.value,
                              {"entry_id": entry["id"], "user_id": entry["user_id"],
-                              "guest_name": entry["guest_name"], "position": before[entry["id"]]})
-        return OpResult(queue_id, entry["id"], before, after)
+                              "guest_name": entry["guest_name"], "position": before[entry["id"]].position})
+        return OpResult(queue_id, action.value, actor_id, entry["id"], None, before, after)
 
     async def _reposition(self, conn: Connection, ordered_entry_ids: list[int]) -> None:
-        """Единая функция расстановки мест 1..N. Её используют выход, а дальше обмен,
-        удаление и перестановка (этапы 2 и 5)."""
+        """Единая функция расстановки мест 1..N. Её используют выход, обмен,
+        а дальше удаление и перестановка (этап 5)."""
         await repo.set_positions(conn, [(e, i) for i, e in enumerate(ordered_entry_ids, start=1)])
+
+    async def _expire_moved_swaps(self, conn: Connection, before: dict[int, EntrySnap],
+                                  after: dict[int, EntrySnap]) -> None:
+        """Запрос на обмен обещал конкретные места — если они сдвинулись, запрос неактуален."""
+        moved = [e for e, s in after.items() if before.get(e) and before[e].position != s.position]
+        await repo.expire_swaps_for_entries(conn, moved)

@@ -267,6 +267,58 @@ async def get_user_active_entries(conn: Connection, user_id: int) -> list[Row]:
     return list(await cur.fetchall())
 
 
+async def get_users(conn: Connection, user_ids: list[int]) -> dict[int, Row]:
+    if not user_ids:
+        return {}
+    marks = ",".join("?" * len(user_ids))
+    cur = await conn.execute(f"SELECT * FROM users WHERE id IN ({marks})", list(user_ids))
+    return {r["id"]: r for r in await cur.fetchall()}
+
+
+# ---------- swap requests ----------
+
+async def create_swap_request(conn: Connection, queue_id: int, from_entry_id: int, to_entry_id: int) -> int:
+    cur = await conn.execute(
+        """INSERT INTO swap_requests (queue_id, from_entry_id, to_entry_id, status, created_at)
+           VALUES (?, ?, ?, 'pending', ?)""",
+        (queue_id, from_entry_id, to_entry_id, now()),
+    )
+    return cur.lastrowid
+
+
+async def get_swap_request(conn: Connection, request_id: int) -> Row | None:
+    cur = await conn.execute("SELECT * FROM swap_requests WHERE id = ?", (request_id,))
+    return await cur.fetchone()
+
+
+async def set_swap_status(conn: Connection, request_id: int, status: str) -> None:
+    await conn.execute("UPDATE swap_requests SET status = ? WHERE id = ?", (status, request_id))
+
+
+async def cancel_pending_swaps_from(conn: Connection, from_entry_id: int) -> None:
+    await conn.execute(
+        "UPDATE swap_requests SET status = 'cancelled' WHERE from_entry_id = ? AND status = 'pending'",
+        (from_entry_id,),
+    )
+
+
+async def expire_swaps_for_entries(conn: Connection, entry_ids: list[int]) -> None:
+    if not entry_ids:
+        return
+    marks = ",".join("?" * len(entry_ids))
+    await conn.execute(
+        f"""UPDATE swap_requests SET status = 'expired'
+            WHERE status = 'pending' AND (from_entry_id IN ({marks}) OR to_entry_id IN ({marks}))""",
+        [*entry_ids, *entry_ids],
+    )
+
+
+async def expire_queue_swaps(conn: Connection, queue_id: int) -> None:
+    await conn.execute(
+        "UPDATE swap_requests SET status = 'expired' WHERE queue_id = ? AND status = 'pending'", (queue_id,)
+    )
+
+
 # ---------- messages ----------
 
 async def save_queue_message(conn: Connection, queue_id: int, chat_id: int, message_id: int) -> None:

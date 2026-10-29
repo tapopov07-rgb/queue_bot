@@ -16,6 +16,12 @@ class MyCb(CallbackData, prefix="my"):
     entry_id: int = 0
 
 
+class SwapCb(CallbackData, prefix="sw"):
+    action: str  # start | pick | accept | decline | cancel
+    a: int = 0   # start: моя запись; pick: моя запись; accept/decline/cancel: id запроса
+    b: int = 0   # pick: запись, с которой меняемся
+
+
 class AddCb(CallbackData, prefix="add"):
     queue_id: int
     user_id: int  # 0 — отмена

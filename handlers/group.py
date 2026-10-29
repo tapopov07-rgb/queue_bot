@@ -9,6 +9,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from db import repo
 from db.database import Database
 from keyboards import QueueCb, deep_link
+from services.notifier import Notifier
 from services.queue_service import QueueError, QueueService
 from services.renderer import QueueMessenger, user_name
 
@@ -85,13 +86,14 @@ async def cb_join(callback: CallbackQuery, callback_data: QueueCb, db: Database,
 
 @router.callback_query(QueueCb.filter(F.action == "leave"))
 async def cb_leave(callback: CallbackQuery, callback_data: QueueCb, service: QueueService,
-                   messenger: QueueMessenger) -> None:
+                   messenger: QueueMessenger, notifier: Notifier) -> None:
     try:
         res = await service.leave_queue(callback_data.queue_id, callback.from_user.id)
     except QueueError as e:
         await callback.answer(str(e), show_alert=True)
         return
     messenger.refresh(res.queue_id)
+    notifier.notify(res)
     await callback.answer("🚪 Запись удалена")
 
 

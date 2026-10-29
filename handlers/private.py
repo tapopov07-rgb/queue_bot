@@ -16,7 +16,8 @@ from config import Config
 from db import repo
 from db.database import Database
 from handlers import admin
-from keyboards import MY_QUEUES_TEXT, AddCb, MyCb, main_menu
+from keyboards import MY_QUEUES_TEXT, AddCb, MyCb, SwapCb, main_menu
+from services.notifier import Notifier
 from services.queue_service import MAX_ADDED_OTHERS, QueueError, QueueService
 from services.renderer import QueueMessenger, fmt_class_time, fmt_moment, to_dt, user_name
 
@@ -193,22 +194,27 @@ async def build_my_queues(db: Database, user_id: int, tz: ZoneInfo) -> tuple[str
         lines += ["", f"<b>{escape(q['subject'])}</b> · {fmt_class_time(q, tz)}"]
         if q["status"] == "scheduled":
             lines.append(f"   ⏳ запись откроется {fmt_moment(q['opens_at'], tz)}")
-        short = f"{q['subject'][:20]} {to_dt(q['starts_at'], tz):%d.%m}"
+        short = f"{q['subject'][:18]} {to_dt(q['starts_at'], tz):%d.%m}"
         for e in entries:
             place = f"<b>{e['position']}</b> из {q['total']}"
-            cb = MyCb(action="leave", entry_id=e["entry_id"])
+            leave_cb = MyCb(action="leave", entry_id=e["entry_id"]).pack()
             if e["user_id"] == user_id and not e["guest_name"]:
                 by = "" if e["added_by"] == user_id else \
                     f" <i>(записал(а) {_full(e['adder_first_name'], e['adder_last_name'])})</i>"
                 lines.append(f"   Ты: {place}{by}")
-                kb.button(text=f"🚪 Выйти · {short}", callback_data=cb)
+                leave_text = f"🚪 Выйти · {short}"
             else:
                 name = escape(e["guest_name"]) if e["guest_name"] else _full(e["first_name"], e["last_name"])
                 lines.append(f"   {name} <i>(ты записал(а))</i>: {place}")
                 plain = e["guest_name"] or e["first_name"]
-                kb.button(text=f"🚪 Убрать {plain[:15]} · {short}", callback_data=cb)
-    kb.button(text="🔄 Обновить", callback_data=MyCb(action="refresh"))
-    kb.adjust(1)
+                leave_text = f"🚪 Убрать {plain[:12]} · {short}"
+            row = [InlineKeyboardButton(text=leave_text, callback_data=leave_cb)]
+            # меняться может только владелец записи (свою или вписанного по имени)
+            if e["user_id"] == user_id and q["status"] == "open" and q["total"] > 1:
+                row.append(InlineKeyboardButton(
+                    text="🔄 Поменяться", callback_data=SwapCb(action="start", a=e["entry_id"]).pack()))
+            kb.row(*row)
+    kb.row(InlineKeyboardButton(text="🔄 Обновить", callback_data=MyCb(action="refresh").pack()))
     return "\n".join(lines), kb.as_markup()
 
 
@@ -240,12 +246,13 @@ async def cb_refresh(callback: CallbackQuery, db: Database, config: Config) -> N
 
 @router.callback_query(MyCb.filter(F.action == "leave"))
 async def cb_leave(callback: CallbackQuery, callback_data: MyCb, db: Database, config: Config,
-                   service: QueueService, messenger: QueueMessenger) -> None:
+                   service: QueueService, messenger: QueueMessenger, notifier: Notifier) -> None:
     try:
         res = await service.leave(callback_data.entry_id, callback.from_user.id)
     except QueueError as e:
         await callback.answer(str(e), show_alert=True)
     else:
         messenger.refresh(res.queue_id)
+        notifier.notify(res)
         await callback.answer("Готово")
     await _edit_my_queues(callback, db, config.tz)
