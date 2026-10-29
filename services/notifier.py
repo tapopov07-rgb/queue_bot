@@ -113,7 +113,9 @@ class Notifier:
         if c.new is None:
             return f"❌ {who}: запись убрана из очереди" if c.guest_name else "❌ Тебя убрали из очереди"
         arrow = "⬆️" if c.new < c.old else "⬇️"
-        return f"{arrow} {who}: теперь <b>{c.new}</b>-й (был {c.old}-й)"
+        ahead = next((s for s in result.after.values() if s.position == c.new - 1), None)
+        ahead_text = f"за <b>{self._name(ahead, users)}</b>" if ahead else "впереди никого 🎉"
+        return f"{arrow} {who}: теперь <b>{c.new}</b>-й (был {c.old}-й) · {ahead_text}"
 
     async def _deliver(self, user_id: int, text: str, retry: bool = True) -> None:
         try:

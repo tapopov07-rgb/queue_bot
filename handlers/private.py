@@ -196,7 +196,13 @@ async def build_my_queues(db: Database, user_id: int, tz: ZoneInfo) -> tuple[str
             lines.append(f"   ⏳ запись откроется {fmt_moment(q['opens_at'], tz)}")
         short = f"{q['subject'][:18]} {to_dt(q['starts_at'], tz):%d.%m}"
         for e in entries:
-            place = f"<b>{e['position']}</b> из {q['total']}"
+            if e["prev_guest_name"]:
+                ahead = f"за <b>{escape(e['prev_guest_name'])}</b>"
+            elif e["prev_first_name"]:
+                ahead = f"за <b>{_full(e['prev_first_name'], e['prev_last_name'])}</b>"
+            else:
+                ahead = "впереди никого"
+            place = f"<b>{e['position']}</b> из {q['total']} · {ahead}"
             leave_cb = MyCb(action="leave", entry_id=e["entry_id"]).pack()
             if e["user_id"] == user_id and not e["guest_name"]:
                 by = "" if e["added_by"] == user_id else \

@@ -76,9 +76,17 @@ async def cb_join(callback: CallbackQuery, callback_data: QueueCb, db: Database,
         await callback.answer(str(e), show_alert=True)
         return
     messenger.refresh(res.queue_id)
+    ahead = next((s for s in res.after.values() if s.position == res.position - 1), None)
     async with db.read() as conn:
         user = await repo.get_user(conn, callback.from_user.id)
+        ahead_user = await repo.get_user(conn, ahead.user_id) if ahead else None
     text = f"✅ Ты записан — место {res.position}"
+    if ahead:
+        # всплывающее окно — простой текст, без HTML
+        name = ahead.guest_name or " ".join(filter(None, (ahead_user["first_name"], ahead_user["last_name"])))
+        text += f", за {name}"
+    else:
+        text += ", впереди никого"
     if not user["can_dm"]:
         text += f"\n\nЧтобы получать уведомления о сдвиге места, открой @{bot_username} и нажми «Start»"
     await callback.answer(text, show_alert=not user["can_dm"])

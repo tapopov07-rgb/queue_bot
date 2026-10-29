@@ -255,11 +255,15 @@ async def get_user_active_entries(conn: Connection, user_id: int) -> list[Row]:
                   u.first_name, u.last_name,
                   a.first_name AS adder_first_name, a.last_name AS adder_last_name,
                   q.id AS queue_id, q.subject, q.starts_at, q.ends_at, q.opens_at, q.status,
-                  (SELECT COUNT(*) FROM queue_entries x WHERE x.queue_id = q.id) AS total
+                  (SELECT COUNT(*) FROM queue_entries x WHERE x.queue_id = q.id) AS total,
+                  p.guest_name AS prev_guest_name, pu.first_name AS prev_first_name,
+                  pu.last_name AS prev_last_name
            FROM queue_entries e
            JOIN queues q ON q.id = e.queue_id
            JOIN users u ON u.id = e.user_id
            JOIN users a ON a.id = e.added_by
+           LEFT JOIN queue_entries p ON p.queue_id = e.queue_id AND p.position = e.position - 1
+           LEFT JOIN users pu ON pu.id = p.user_id
            WHERE (e.user_id = ? OR e.added_by = ?) AND q.status IN (?, ?)
            ORDER BY q.starts_at, q.id, e.position""",
         (user_id, user_id, *ACTIVE_STATUSES),
